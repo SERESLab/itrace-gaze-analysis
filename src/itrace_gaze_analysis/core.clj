@@ -35,9 +35,11 @@
   "Transform a list of gaze hashes into a list of strings containing the file,
    source code entities, and line number."
   [gaze-list]
-  (map #(let [attrs (get % :attrs)] (str "Line " (get attrs :line) " ----- "
-    (get attrs :file) " ----- " (get attrs :fullyQualifiedNames)))
-    gaze-list))
+  (map #(let [attrs (get % :attrs)] {
+      :line (get attrs :line)
+      :file (get attrs :file)
+      :fullyQualifiedNames (get attrs :fullyQualifiedNames)
+    }) gaze-list))
 
 (defn sources-each-gaze
   "Get source code entities for each gaze in an array."
@@ -79,9 +81,7 @@
 (defn sort-distinct-by-freq-desc
   "Sort the results of distinct-count by frequency descending."
   [item-list]
-  (into (sorted-map-by (fn [key1 key2] (compare [(get item-list key2) key2]
-                                                [(get item-list key1) key1])))
-        item-list))
+  (sort #(compare (last %2) (last %1)) item-list))
 
 (defn -main [& args]
   (case (first args)
