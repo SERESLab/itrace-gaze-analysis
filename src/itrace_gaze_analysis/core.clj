@@ -54,14 +54,18 @@
   gaze-list))
 
 (defn distinct-count
-  "For a list of items, return a hash of distinct items to amount of times it
-   occurs."
+  "Adds a :count field to each hashmap in the input, and drops any duplicate
+   hashmaps that result."
   [item-list]
-  (reduce (fn [obj, item]
-    (if (nil? (get obj item))
-        (assoc obj item 1)
-        (assoc obj item (+ (get obj item) 1))
-      )) {} item-list))
+  ;Moves the count into the hashmap as :count.
+  (map #(assoc (first %) :count (second %))
+    ;Converts hashmaps to unique collections containing the hashmap then the
+    ;count.
+    (reduce (fn [obj, item]
+      (if (nil? (get obj item))
+          (assoc obj item 1)
+          (assoc obj item (+ (get obj item) 1))
+        )) {} item-list)))
 
 (defn get-fully-qualified-names
   "Gets the fully qualified name of a source code entity."
@@ -78,28 +82,31 @@
          0))
     gaze-list))
 
-(defn sort-distinct-by-freq-desc
-  "Sort the results of distinct-count by frequency descending."
+(defn sort-distinct-by-count-desc
+  "Sort the results of distinct-count by count descending."
   [item-list]
-  (sort #(compare (last %2) (last %1)) item-list))
+  (sort #(compare (get %2 :count) (get %1 :count)) item-list))
 
 (defn -main [& args]
   (case (first args)
     "ranked-method-decl" (dorun
-      (let [res (sort-distinct-by-freq-desc (distinct-count
+      (let [res (sort-distinct-by-count-desc (distinct-count
+                ;Convert each string into a hashmap with one entry from
+                ;:fullyQualifiedName to the string's value.
+                (map #(hash-map :fullyQualifiedName %)
                 (get-fully-qualified-names (only-method-declarations (flatten
                 (sources-each-gaze (get-gazes-from-root (read-xml-file
-                (nth args 1)))))))))]
-        (doseq [[k v] res] (println (str k " ::::: " v)))))
+                (nth args 1))))))))))]
+        (doseq [item res] (println item))))
     "ranked-lines" (dorun
-      (let [res (sort-distinct-by-freq-desc (distinct-count (file+sces+lines
+      (let [res (sort-distinct-by-count-desc (distinct-count (file+sces+lines
                 (get-gazes-from-root (read-xml-file (nth args 1))))))]
-        (doseq [[k v] res] (println (str k " ::::: " v)))))
+        (doseq [item res] (println item))))
     "ranked-lines-in-method" (dorun
-      (let [res (sort-distinct-by-freq-desc (distinct-count (file+sces+lines
+      (let [res (sort-distinct-by-count-desc (distinct-count (file+sces+lines
                 (only-method-named (get-gazes-from-root (read-xml-file
                 (nth args 1))) (nth args 2)))))]
-        (doseq [[k v] res] (println (str k "\t" v)))))
+        (doseq [item res] (println item))))
     (println (str "How would you like to run this program? Specify as args.\n"
                   "  <prog.jar> ranked-method-decl <GAZE_FILE>\n"
                   "  <prog.jar> ranked-lines <GAZE_FILE>\n"
