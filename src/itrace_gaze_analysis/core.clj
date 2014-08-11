@@ -101,6 +101,76 @@
   [item-list]
   (sort #(compare (get %2 :count) (get %1 :count)) item-list))
 
+(defn sorted-outages
+  "Find time between each gaze in seconds and sort descending."
+  [gaze-list]
+  (sort #(compare (get %2 :difference) (get %1 :difference))
+        (map (fn [x]
+            (let [fst-time (Long. (get (get (first x) :attrs) :system-time))
+                  snd-time (Long. (get (get (second x) :attrs) :system-time))]
+              {
+                :difference (double (/ (- snd-time fst-time) 1000))
+                :start-time fst-time
+              }))
+          (partition 2 1 gaze-list))))
+
+(defn average-validation
+  "Get an average of left and right validation across all input gazes."
+  [gaze-list]
+  (let [summed-validation
+        (reduce (fn [sum gaze]
+                  {
+                    :left-validation (+ (get sum :left-validation)
+                                        (read-string (get (get gaze :attrs)
+                                                          :left-validation)))
+                    :right-validation (+ (get sum :right-validation)
+                                         (read-string (get (get gaze :attrs)
+                                                           :right-validation)))
+                  })
+                { :left-validation 0.0 :right-validation 0.0 } gaze-list)]
+    { :average-left-validation (/ (get summed-validation :left-validation)
+                                  (count gaze-list))
+      :average-right-validation (/ (get summed-validation :right-validation)
+                                   (count gaze-list)) }))
+
+;Helper function for average-framerates-and-validity
+(defn partition-framerate-intervals
+  "Breaks a gaze list into partitions of gazes fitting into a time interval."
+  [gaze-list interval-milis]
+  (if (empty? gaze-list)
+    []
+    (reduce (fn [gaze-intervals x]
+        (if (> (- (Long. (get (get x :attrs) :system-time))
+                  (Long. (get (get (first (peek gaze-intervals)) :attrs)
+                              :system-time)))
+               interval-milis)
+          ;New interval
+          (conj gaze-intervals [x])
+          ;Existing interval;
+          (update-in gaze-intervals [(dec (count gaze-intervals))]
+                     conj x)))
+      [[(first gaze-list)]] (rest gaze-list))))
+
+(defn average-framerates-and-validity
+  "Determines the average framerate for given time intervals in gazes per
+   second."
+  [gaze-list interval-milis]
+  (map (fn [interval-gazes]
+      {
+        :framerate (double (/ (count interval-gazes) (/ interval-milis 1000)))
+        :start-time (get (get (first interval-gazes) :attrs) :system-time)
+        :end-time (get (get (last interval-gazes) :attrs) :system-time)
+        :average-left-validation (/
+          (reduce + (map #(read-string (get (get % :attrs) :left-validation))
+                         interval-gazes))
+          (count interval-gazes))
+        :average-right-validation (/
+          (reduce + (map #(read-string (get (get % :attrs) :right-validation))
+                         interval-gazes))
+          (count interval-gazes))
+      })
+    (partition-framerate-intervals gaze-list interval-milis)))
+
 (defn -main [& args]
   (case (first args)
     "ranked-method-decl" (dorun
@@ -123,8 +193,36 @@
                 (nth args 1))) (nth args 3)))))]
         (write-csv-file (nth args 2) res
                         [:line :file :fullyQualifiedNames :count])))
+    "validate" (dorun
+      (let [gaze-list (get-gazes-from-root (read-xml-file (nth args 1)))]
+        (println "Difference between times of two adjacent gazes which are "
+                 "greater than one second:")
+        (let [outages (filter #(> (get % :difference) 1.0)
+                              (sorted-outages gaze-list))]
+          (doseq [outage outages]
+            (println (str "Seconds: " (get outage :difference) " at timestamp "
+                          (get outage :start-time)))))
+        (println "\nAverage validation for entire session:")
+        (let [validation (average-validation gaze-list)]
+          (println (str "Left-validation average: "
+                        (get validation :average-left-validation) ", "
+                        "Right-validation average: "
+                        (get validation :average-right-validation))))
+        (println "\nPer maximum 30 second interval, average framerate (in "
+                 "seconds) and validation: ")
+        (let [intervals (average-framerates-and-validity gaze-list 30000)]
+          (doseq [cur-interval intervals]
+            (println (str "Average framerate on interval "
+                          "[" (get cur-interval :start-time) "] - "
+                          "[" (get cur-interval :end-time) "]: "
+                          (get cur-interval :framerate)
+                          "\t----- Left validation average: "
+                          (get cur-interval :average-left-validation)
+                          ", Right validation average: "
+                          (get cur-interval :average-right-validation)))))))
     (println (str "How would you like to run this program? Specify as args.\n"
                   "  <prog.jar> ranked-method-decl <GAZE_FILE> <OUT_CSV>\n"
                   "  <prog.jar> ranked-lines <GAZE_FILE> <OUT_CSV>\n"
                   "  <prog.jar> ranked-lines-in-method <GAZE_FILE> <OUT_CSV> "
-                  "<FULLY_QUALIFIED_METHOD_NAME>"))))
+                  "<FULLY_QUALIFIED_METHOD_NAME>"
+                  "  <prog.jar> validate <GAZE_FILE>"))))
