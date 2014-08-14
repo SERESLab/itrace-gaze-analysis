@@ -19,7 +19,7 @@
    columns are exported."
   [file-path collection-to-write key-order]
   (with-open [file (io/writer file-path)]
-    (let [content (concat [key-order] ;Export keys.
+    (let [content (concat [(map name key-order)] ;Export keys.
                           (map (fn [item] (map #(get item %) key-order))
                                collection-to-write))]
       (csv/write-csv file content))))
@@ -171,6 +171,46 @@
       })
     (partition-framerate-intervals gaze-list interval-milis)))
 
+(defn timestamps [gazes]
+  (map #(Long/parseLong (get (get % :attrs) :system-time) 10) gazes))
+
+(defn parent?
+  "Returns true if the first SCE given contains the second."
+  [x y]
+  (let
+    [x (reverse x)
+     y (reverse y)]
+    (= x (take (count x) y))))
+
+(defn copy-family
+  "Return a sequence of gazes containing the first group in xs as well as
+   the children immediately following it."
+  [xs]
+  (reduce into
+    (take-while
+      #(parent?
+         (.split (or ((get (ffirst xs) :attrs) :fullyQualifiedNames) "") ";")
+         (.split (or ((get (first %) :attrs) :fullyQualifiedNames) "") ";"))
+      xs)))
+
+(defn eventify
+  "Convert a sequence of gazes to a sequence of events. Each event is a map
+   with the keys :fullyQualifiedName, :duration (measured in gazes),
+   :type, :startTime, and :endTime."
+  [gazes]
+  (let [chunks (partition-by get-source-code-entities gazes)]
+    (map-indexed (fn [i x]
+      (let [family (copy-family (drop i chunks))
+            times (timestamps family)
+            sce (get-source-code-entities (first x))]
+        (hash-map
+          :duration (count family),
+          :type (:type (first sce)),
+          :fullyQualifiedName (:fullyQualifiedName (first sce)),
+          :startTime (reduce min times),
+          :endTime (reduce max times))))
+      chunks)))
+
 (defn -main [& args]
   (case (first args)
     "ranked-method-decl" (dorun
@@ -220,9 +260,15 @@
                           (get cur-interval :average-left-validation)
                           ", Right validation average: "
                           (get cur-interval :average-right-validation)))))))
+    "events" (write-csv-file (nth args 2)
+               (eventify
+                 (get-gazes-from-root
+                   (read-xml-file (nth args 1)))
+               [:fullyQualifiedName :duration :type :startTime :endTime]))
     (println (str "How would you like to run this program? Specify as args.\n"
                   "  <prog.jar> ranked-method-decl <GAZE_FILE> <OUT_CSV>\n"
                   "  <prog.jar> ranked-lines <GAZE_FILE> <OUT_CSV>\n"
                   "  <prog.jar> ranked-lines-in-method <GAZE_FILE> <OUT_CSV> "
-                  "<FULLY_QUALIFIED_METHOD_NAME>"
-                  "  <prog.jar> validate <GAZE_FILE>"))))
+                  "<FULLY_QUALIFIED_METHOD_NAME>\n"
+                  "  <prog.jar> validate <GAZE_FILE>\n"
+                  "  <proj.jar> events <GAZE_FILE> <OUT_CSV>"))))
