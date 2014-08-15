@@ -22,7 +22,7 @@
     (let [content (concat [(map name key-order)] ;Export keys.
                           (map (fn [item] (map #(get item %) key-order))
                                collection-to-write))]
-      (csv/write-csv file content))))
+      (csv/write-csv file content :separator \tab))))
 
 (defn get-gazes-from-root
   "When the return value of read-xml-file is provided, an array of the gaze
@@ -171,8 +171,34 @@
       })
     (partition-framerate-intervals gaze-list interval-milis)))
 
+(defn ast?
+  "Checks if the gaze has AST information."
+  [gaze]
+  (not (= "" (get (:attrs gaze) :fullyQualifiedNames ""))))
+
+(defn noncode?
+  "Checks if the gaze is in a txt file."
+  [gaze]
+  (re-matches #"(?i).*\.txt$" (:file (:attrs gaze))))
+
 (defn timestamps [gazes]
   (map #(Long/parseLong (get (get % :attrs) :system-time) 10) gazes))
+
+(defn kind
+  "Works out the value of the elementKind field."
+  [gaze]
+  (let
+    [sce (get-source-code-entities gaze)]
+    (cond
+      (noncode? gaze) "Bug report"
+      (= "VARIABLE" (:type (first sce))) "Variable"
+      (= "TYPE" (:type (first sce))) "Class"
+      (and (= "METHOD" (:type (first sce)))
+           (= "DECLARE" (:how (first sce)))) "Method"
+      (and (= "METHOD" (:type (first sce)))
+           (= "USE" (:how (first sce)))) "Call"
+      :else (throw (Exception. (str "unhandled kind at "
+                                    (:nano-time (:attrs gaze))))))))
 
 (defn parent?
   "Returns true if the first SCE given contains the second."
@@ -195,8 +221,8 @@
 
 (defn eventify
   "Convert a sequence of gazes to a sequence of events. Each event is a map
-   with the keys :fullyQualifiedName, :duration (measured in gazes),
-   :type, :startTime, and :endTime."
+   with the keys :elementKind, :duration (measured in gazes),
+   :identifier, :startTime, and :endTime."
   [gazes]
   (let [chunks (partition-by get-source-code-entities gazes)]
     (map-indexed (fn [i x]
@@ -205,8 +231,8 @@
             sce (get-source-code-entities (first x))]
         (hash-map
           :duration (count family),
-          :type (:type (first sce)),
-          :fullyQualifiedName (:fullyQualifiedName (first sce)),
+          :elementKind (kind (first x)),
+          :identifier (:fullyQualifiedName (first sce)),
           :startTime (reduce min times),
           :endTime (reduce max times))))
       chunks)))
@@ -262,9 +288,11 @@
                           (get cur-interval :average-right-validation)))))))
     "events" (write-csv-file (nth args 2)
                (eventify
-                 (get-gazes-from-root
-                   (read-xml-file (nth args 1)))
-               [:fullyQualifiedName :duration :type :startTime :endTime]))
+                 (filter
+                   #(or (ast? %) (noncode? %))
+                   (get-gazes-from-root
+                     (read-xml-file (nth args 1)))))
+               [:identifier :duration :elementKind :startTime :endTime])
     (println (str "How would you like to run this program? Specify as args.\n"
                   "  <prog.jar> ranked-method-decl <GAZE_FILE> <OUT_CSV>\n"
                   "  <prog.jar> ranked-lines <GAZE_FILE> <OUT_CSV>\n"
