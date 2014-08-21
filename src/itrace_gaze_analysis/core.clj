@@ -22,14 +22,17 @@
     (let [content (concat [(map name key-order)] ;Export keys.
                           (map (fn [item] (map #(get item %) key-order))
                                collection-to-write))]
-      (csv/write-csv file content :separator \tab))))
+      (csv/write-csv file content))))
 
 (defn get-gazes-from-root
   "When the return value of read-xml-file is provided, an array of the gaze
    hashes are returned"
   [xml-root]
-  (get (first (filter #(= (get % :tag) :gazes) (get (first xml-root) :content)))
-       :content))
+  (map first
+    (partition-by
+      #(:tracker-time (:attrs %))
+      (get (first (filter #(= (get % :tag) :gazes)
+          (get (first xml-root) :content))) :content))))
 
 (defn get-source-code-entities
   "Gets the source code entities in a particular gaze as hashes containing
@@ -44,6 +47,60 @@
         (.split (get (get gaze-xml :attrs) :types) ";")
         (.split (get (get gaze-xml :attrs) :hows) ";"))
       [])))
+
+(defn get-srcml-file
+  "Get the srcML representation of <filename> from the project XML file."
+  [xml-root filename]
+  (first
+    (filter
+      #(and (not (string? %))
+          (.endsWith (get (get % :attrs) :filename) filename))
+      (get (first xml-root) :content))))
+
+(defn srcml-line-count
+  "Recursively count the number of lines taken by <sce>. N.B. that the XML
+   parser strips trailing whitespace caracters, significantly reducing the line
+   count. A quick & dirty way around this is to add some garbage to each line
+   to force the parser to retain newlines. This procedure could break other
+   processing, so be careful!"
+  [sce]
+  (if (string? sce)
+    (count (re-seq #"\r?\n" sce))
+    (reduce + (map srcml-line-count (get sce :content)))))
+
+(defn srcml-blank-lines
+  "Return a count of the blank lines in <sce>. Similar to srcml-line-count."
+  [sce]
+  (if (string? sce)
+    (count (re-seq #"(?<=\n)\s*.\r?\n" sce))
+    (reduce + (map srcml-blank-lines (get sce :content)))))
+
+(defn srcml-start-line
+  "Find the start line of <sce> by recursively searching for
+   position attributes."
+  [sce]
+  (if (not (string? sce))
+    (if-let [line (:pos:line (:attrs sce))]
+      (Integer/parseInt line)
+      (first (keep srcml-start-line (:content sce))))))
+
+(defn short-name
+  "Extract a local name from <sce>."
+  [sce]
+  (re-find #"(?<=^|\.)[^\.;\(\)]+(?=$|;|\()"
+    (or (:fullyQualifiedName sce) "")))
+
+(defn srcml-find
+  "Find the SCE corresponding to <local-name> in <xml-root>."
+  [local-name xml-root]
+  (if (not (string? xml-root))
+    (if (and
+      (or (= :function (:tag xml-root)) (= :class (:tag xml-root)))
+      (some
+        #(and (= :name (get % :tag)) (= local-name (first (:content %))))
+        (:content xml-root)))
+      xml-root
+      (first (keep (partial srcml-find local-name) (:content xml-root))))))
 
 (defn file+sces+lines
   "Transform a list of gaze hashes into a list of strings containing the file,
@@ -181,9 +238,6 @@
   [gaze]
   (re-matches #"(?i).*\.txt$" (:file (:attrs gaze))))
 
-(defn timestamps [gazes]
-  (map #(Long/parseLong (get (get % :attrs) :system-time) 10) gazes))
-
 (defn kind
   "Works out the value of the elementKind field."
   [gaze]
@@ -199,6 +253,10 @@
            (= "USE" (:how (first sce)))) "Call"
       :else (throw (Exception. (str "unhandled kind at "
                                     (:nano-time (:attrs gaze))))))))
+
+(defn average
+  [coll]
+  (/ (reduce + coll) (count coll)))
 
 (defn parent?
   "Returns true if the first SCE given contains the second."
@@ -223,19 +281,44 @@
   "Convert a sequence of gazes to a sequence of events. Each event is a map
    with the keys :elementKind, :duration (measured in gazes),
    :identifier, :startTime, and :endTime."
-  [gazes]
-  (let [chunks (partition-by get-source-code-entities gazes)]
-    (map-indexed (fn [i x]
-      (let [family (copy-family (drop i chunks))
-            times (timestamps family)
-            sce (get-source-code-entities (first x))]
+  [xml-root gazes]
+  (let [blocks (partition-by get-source-code-entities gazes)]
+    (map-indexed (fn [i block]
+      (let [family (copy-family (drop i blocks))
+            times (map
+                #(Long/parseLong (get (get % :attrs) :system-time) 10)
+                family)
+            sce (get-source-code-entities (first block))
+            local-name (short-name (first sce))
+            filename (:file (:attrs (first block)))
+            srcml-elem (srcml-find local-name
+                (get-srcml-file xml-root filename))
+            linecount (srcml-line-count srcml-elem)
+            element-kind (kind (first block))]
         (hash-map
-          :duration (count family),
-          :elementKind (kind (first x)),
-          :identifier (:fullyQualifiedName (first sce)),
-          :startTime (reduce min times),
-          :endTime (reduce max times))))
-      chunks)))
+          :duration (count family)
+          :elementKind element-kind
+          :identifier local-name
+          :startTime (reduce min times)
+          :endTime (reduce max times)
+          :numberOfLines (cond
+              (or (= element-kind "Method")
+                  (= element-kind "Class")) linecount
+              (or (= element-kind "Call")
+                  (= element-kind "Variable")) 1)
+          :numberOfNonEmptyLines (cond
+              (or (= element-kind "Method")
+                  (= element-kind "Class"))
+                (- linecount (srcml-blank-lines srcml-elem))
+              (or (= element-kind "Call")
+                  (= element-kind "Variable")) 1)
+          :leftPupilDilation (average (map
+              #(Float/parseFloat (:left-pupil-diameter (:attrs %)))
+              family))
+          :rightPupilDilation (average (map
+              #(Float/parseFloat (:right-pupil-diameter (:attrs %)))
+              family)))))
+      blocks)))
 
 (defn -main [& args]
   (case (first args)
@@ -286,17 +369,20 @@
                           (get cur-interval :average-left-validation)
                           ", Right validation average: "
                           (get cur-interval :average-right-validation)))))))
-    "events" (write-csv-file (nth args 2)
+    "events" (write-csv-file (nth args 3)
                (eventify
+                 (read-xml-file (nth args 1))
                  (filter
                    #(or (ast? %) (noncode? %))
                    (get-gazes-from-root
-                     (read-xml-file (nth args 1)))))
-               [:identifier :duration :elementKind :startTime :endTime])
+                     (read-xml-file (nth args 2)))))
+               [:identifier :duration :elementKind :numberOfNonEmptyLines
+                :numberOfLines :startTime :endTime
+                :leftPupilDilation :rightPupilDilation])
     (println (str "How would you like to run this program? Specify as args.\n"
                   "  <prog.jar> ranked-method-decl <GAZE_FILE> <OUT_CSV>\n"
                   "  <prog.jar> ranked-lines <GAZE_FILE> <OUT_CSV>\n"
                   "  <prog.jar> ranked-lines-in-method <GAZE_FILE> <OUT_CSV> "
                   "<FULLY_QUALIFIED_METHOD_NAME>\n"
                   "  <prog.jar> validate <GAZE_FILE>\n"
-                  "  <proj.jar> events <GAZE_FILE> <OUT_CSV>"))))
+                  "  <proj.jar> events <SCRML_PATH> <GAZE_FILE> <OUT_CSV>"))))
