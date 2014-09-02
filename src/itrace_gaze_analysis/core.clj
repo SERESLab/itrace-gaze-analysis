@@ -1,9 +1,11 @@
 (ns itrace-gaze-analysis.core (:gen-class))
 
 (require '[clojure.java.io :as io]
+         '[clojure.string :as string]
          '[clojure.xml :as xml]
          '[clojure.zip :as zip]
-         '[clojure.data.csv :as csv])
+         '[clojure.data.csv :as csv]
+         'clojure.set)
 
 (defn read-xml-file
   "Reads an XML document specified by the first parameter and represents it as
@@ -137,6 +139,69 @@
           (assoc obj item 1)
           (assoc obj item (+ (get obj item) 1))
         )) {} item-list)))
+
+(defn line-durations-and-revisits
+  "Given a list of gazes, the list will be reduced to another in which there is
+   one source line per list item. Each item is a hash containing combined values
+   of gazes on that line: validation and pupil diameter are avaeraged, source
+   code entities are merged (often duplicated). The values :duration, length of
+   time gazes occur on line overall, and :visits, amount of times the line is
+   visited after another gaze event, are added to the hash."
+  [gaze-list]
+  (let [gaze-list-attrs (map #(get % :attrs) gaze-list)
+        gaze-list-with-nums (map (fn [x] (reduce #(update-in % [%2] read-string)
+                            x [:left-validation :right-validation
+                               :left-pupil-diameter :right-pupil-diameter]))
+                            gaze-list-attrs)
+        gaze-list-visits (reduce (fn [lhs-list rhs]
+        (let [lhs (first lhs-list)]
+          (if (not (nil? lhs))
+              (if (not= (get lhs :line) (get rhs :line))
+                (conj lhs-list (assoc rhs :visit true))
+                (conj lhs-list rhs))
+            (conj lhs-list rhs))))
+      [] gaze-list-with-nums)]
+    (map (fn [x]
+          (let [k (first x)
+                v (second x)
+                visits (count (filter #(true? (get % :visit)) v))
+                duration (- (read-string (get (last v) :system-time))
+                            (read-string (get (first v) :system-time)))]
+            (reduce (fn [prev cur]
+                (merge cur { :left-validation
+                             (/ (+ (get prev :left-validation)
+                                   (get cur :left-validation)) 2)
+                             :right-validation
+                             (/ (+ (get prev :right-validation)
+                                   (get cur :right-validation)) 2)
+                             :left-pupil-diameter
+                             (/ (+ (get prev :left-pupil-diameter)
+                                   (get cur :left-pupil-diameter)) 2)
+                             :right-pupil-diameter
+                             (/ (+ (get prev :right-pupil-diameter)
+                                   (get cur :right-pupil-diameter)) 2)
+                             :fullyQualifiedNames (str
+                             (get prev :fullyQualifiedNames) ";"
+                             (get cur :fullyQualifiedNames)) }))
+              (map #(merge % { :visits visits :duration duration }) v)))
+          ) (group-by #(get % :line) gaze-list-visits))))
+
+(defn to-sorted-csv-hash
+  "Given the output of line-durations-and-revisits, return hashes of each line,
+   sorted by line number, containing only fields necessary for the output CSV.
+   Also removes duplications in source code entities."
+  [line-gaze-list]
+  (let [sorted-list (sort #(compare (get %1 :line) (get %2 :line))
+                    line-gaze-list)]
+    (map (fn [item]
+        (let [fully-qualified-names (string/join ";" (distinct
+            (filter not-empty (.split (get item :fullyQualifiedNames) ";"))))]
+          { :line (get item :line)
+            :file (get item :file)
+            :fullyQualifiedNames fully-qualified-names
+            :visits (get item :visits)
+            :duration (get item :duration) }))
+      sorted-list)))
 
 (defn get-fully-qualified-names
   "Gets the fully qualified name of a source code entity."
@@ -336,12 +401,19 @@
                 (get-gazes-from-root (read-xml-file (nth args 1))))))]
         (write-csv-file (nth args 2) res
                         [:line :file :fullyQualifiedNames :count])))
+    ;Not sure if this should be removed.
     "ranked-lines-in-method" (dorun
       (let [res (sort-distinct-by-count-desc (distinct-count (file+sces+lines
                 (only-method-named (get-gazes-from-root (read-xml-file
                 (nth args 1))) (nth args 3)))))]
         (write-csv-file (nth args 2) res
                         [:line :file :fullyQualifiedNames :count])))
+    "line-info-in-method" (dorun
+      (let [res (to-sorted-csv-hash (line-durations-and-revisits
+                (only-method-named (get-gazes-from-root (read-xml-file
+                (nth args 1))) (nth args 3))))]
+        (write-csv-file (nth args 2) res
+                        [:line :file :fullyQualifiedNames :duration :visits])))
     "validate" (dorun
       (let [gaze-list (get-gazes-from-root (read-xml-file (nth args 1)))]
         (println "Difference between times of two adjacent gazes which are "
