@@ -199,6 +199,10 @@
           { :line (get item :line)
             :file (get item :file)
             :fullyQualifiedNames fully-qualified-names
+            :left-pupil-diameter (get item :left-pupil-diameter)
+            :right-pupil-diameter (get item :right-pupil-diameter)
+            :left-validation (get item :left-validation)
+            :right-validation (get item :right-validation)
             :visits (get item :visits)
             :duration (get item :duration) }))
       sorted-list)))
@@ -413,7 +417,9 @@
                 (only-method-named (get-gazes-from-root (read-xml-file
                 (nth args 1))) (nth args 3))))]
         (write-csv-file (nth args 2) res
-                        [:line :file :fullyQualifiedNames :duration :visits])))
+          [:line :file :fullyQualifiedNames :left-pupil-diameter
+           :right-pupil-diameter :left-validation :right-validation
+           :duration :visits])))
     "validate" (dorun
       (let [gaze-list (get-gazes-from-root (read-xml-file (nth args 1)))]
         (println "Difference between times of two adjacent gazes which are "
