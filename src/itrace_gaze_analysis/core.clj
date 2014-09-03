@@ -140,6 +140,36 @@
           (assoc obj item (+ (get obj item) 1))
         )) {} item-list)))
 
+(defn gaze-attrs-tag-line-visits
+  "Provided a list of gaze attributes hashes, (map #(get % :attrs) gazes), tag
+   each item { :visit true } if a transition to a new line occurs on that gaze."
+  [gaze-list-attrs]
+  (let [gaze-list-with-nums (map (fn [x] (reduce #(update-in % [%2] read-string)
+          x [:left-validation :right-validation :left-pupil-diameter
+             :right-pupil-diameter]))
+      gaze-list-attrs)]
+    (reduce (fn [lhs-list rhs]
+        (let [lhs (last lhs-list)]
+          (if (not (nil? lhs))
+            (if (not= (get lhs :line) (get rhs :line))
+              (concat lhs-list [(assoc rhs :visit true)])
+              (concat lhs-list [rhs]))
+            (concat lhs-list [rhs]))))
+      [] gaze-list-with-nums)))
+
+(defn break-before-each
+  "For each item in x, evalute pred. Where true, split the list before that
+   item. Returns a list of lists."
+  [pred x]
+  (filter #(not-empty %)
+    (reduce (fn [result item]
+        (let [front (drop-last result)
+              cur-list (last result)]
+          (if (pred item)
+            (concat result [[item]])
+            (concat front [(conj cur-list item)]))))
+      [[]] x)))
+
 (defn line-durations-and-revisits
   "Given a list of gazes, the list will be reduced to another in which there is
    one source line per list item. Each item is a hash containing combined values
@@ -149,24 +179,15 @@
    visited after another gaze event, are added to the hash."
   [gaze-list]
   (let [gaze-list-attrs (map #(get % :attrs) gaze-list)
-        gaze-list-with-nums (map (fn [x] (reduce #(update-in % [%2] read-string)
-                            x [:left-validation :right-validation
-                               :left-pupil-diameter :right-pupil-diameter]))
-                            gaze-list-attrs)
-        gaze-list-visits (reduce (fn [lhs-list rhs]
-        (let [lhs (first lhs-list)]
-          (if (not (nil? lhs))
-              (if (not= (get lhs :line) (get rhs :line))
-                (conj lhs-list (assoc rhs :visit true))
-                (conj lhs-list rhs))
-            (conj lhs-list rhs))))
-      [] gaze-list-with-nums)]
+        gaze-list-visits (gaze-attrs-tag-line-visits gaze-list-attrs)]
     (map (fn [x]
           (let [k (first x)
                 v (second x)
                 visits (count (filter #(true? (get % :visit)) v))
-                duration (- (read-string (get (last v) :system-time))
-                            (read-string (get (first v) :system-time)))]
+                duration (reduce + (map (fn [part]
+                      (- (read-string (get (last part) :system-time))
+                         (read-string (get (first part) :system-time))))
+                    (break-before-each #(get % :visit) v)))]
             (reduce (fn [prev cur]
                 (merge cur { :left-validation
                              (/ (+ (get prev :left-validation)
