@@ -22,17 +22,25 @@
     (let [content (concat [(map name key-order)] ;Export keys.
                           (map (fn [item] (map #(get item %) key-order))
                                collection-to-write))]
-      (csv/write-csv file content))))
+      (csv/write-csv file content  :separator \tab))))
 
 (defn get-gazes-from-root
   "When the return value of read-xml-file is provided, an array of the gaze
    hashes are returned"
   [xml-root]
-  (map first
-    (partition-by
-      #(:tracker-time (:attrs %))
-      (get (first (filter #(= (get % :tag) :gazes)
-          (get (first xml-root) :content))) :content))))
+  (get (first (filter #(= (get % :tag) :gazes)
+      (get (first xml-root) :content))) :content))
+
+(defn guess-class
+ "Work out the parent's name if the filename refers to the enclosing class"
+ [src-files filename]
+ (clojure.string/replace
+  (clojure.string/replace
+   (or
+    (first (filter #(.endsWith % filename) src-files))
+    "")
+   #"\.java$" "")
+  #"/" "."))
 
 (defn get-source-code-entities
   "Gets the source code entities in a particular gaze as hashes containing
@@ -47,6 +55,43 @@
         (.split (get (get gaze-xml :attrs) :types) ";")
         (.split (get (get gaze-xml :attrs) :hows) ";"))
       [])))
+
+(defn ast?
+  "Checks if the gaze has AST information."
+  [gaze]
+  (not (= "" (get (:attrs gaze) :fullyQualifiedNames ""))))
+
+(defn valid?
+  "Checks if the gaze has AST information."
+  [gaze]
+  (not
+   (and
+    (= "0.0" (get (:attrs gaze) :right-validation))
+    (= "0.0" (get (:attrs gaze) :left-validation)))))
+
+(defn code?
+  "Checks if the gaze is in a java file."
+  [gaze]
+  (re-matches #"(?i).*\.java$" (:file (:attrs gaze))))
+
+(defn clean-source-code-entities
+ "Removes invalid data, ensures the main class is always included."
+ [src-files gaze-xml]
+ (cond
+  (nil? gaze-xml) nil
+  (code? gaze-xml) (let
+       [sces (filter
+            #(not (re-find #"^(?:\..*)?$" (get % :fullyQualifiedName "")))
+            (get-source-code-entities gaze-xml))]
+       (if
+        (empty? sces)
+        (list
+         {:type "TYPE"
+          :how "DECLARE"
+          :fullyQualifiedName
+              (guess-class src-files (get (get gaze-xml :attrs) :file))})
+        sces))
+  :else (list (get (get gaze-xml :attrs) :file))))
 
 (defn get-srcml-file
   "Get the srcML representation of <filename> from the project XML file."
@@ -89,6 +134,17 @@
   [sce]
   (re-find #"(?<=^|\.)[^\.;\(\)]+(?=$|;|\()"
     (or (:fullyQualifiedName sce) "")))
+
+(defn clean-name
+  "Use short names for the arguments, remove question marks"
+  [sce]
+  (clojure.string/replace
+   (clojure.string/replace
+    (or (:fullyQualifiedName sce) "")
+    #"(?<=\(|,)[^\(\);,]*\."
+    "")
+   #"\?"
+   ""))
 
 (defn srcml-find
   "Find the SCE corresponding to <local-name> in <xml-root>."
@@ -228,31 +284,18 @@
       })
     (partition-framerate-intervals gaze-list interval-milis)))
 
-(defn ast?
-  "Checks if the gaze has AST information."
-  [gaze]
-  (not (= "" (get (:attrs gaze) :fullyQualifiedNames ""))))
-
-(defn noncode?
-  "Checks if the gaze is in a txt file."
-  [gaze]
-  (re-matches #"(?i).*\.txt$" (:file (:attrs gaze))))
-
 (defn kind
   "Works out the value of the elementKind field."
-  [gaze]
-  (let
-    [sce (get-source-code-entities gaze)]
-    (cond
-      (noncode? gaze) "Bug report"
-      (= "VARIABLE" (:type (first sce))) "Variable"
-      (= "TYPE" (:type (first sce))) "Class"
-      (and (= "METHOD" (:type (first sce)))
-           (= "DECLARE" (:how (first sce)))) "Method"
-      (and (= "METHOD" (:type (first sce)))
-           (= "USE" (:how (first sce)))) "Call"
-      :else (throw (Exception. (str "unhandled kind at "
-                                    (:nano-time (:attrs gaze))))))))
+  [gaze sce]
+  (cond
+   (re-matches #"(?i)\d+\.txt$" (:file (:attrs gaze))) "Bug report"
+   (= "VARIABLE" (:type (first sce))) "Variable"
+   (= "TYPE" (:type (first sce))) "Class"
+   (and (= "METHOD" (:type (first sce)))
+        (= "DECLARE" (:how (first sce)))) "Method"
+   (and (= "METHOD" (:type (first sce)))
+        (= "USE" (:how (first sce)))) "Call"
+   :else "Text"))
 
 (defn average
   [coll]
@@ -269,56 +312,105 @@
 (defn copy-family
   "Return a sequence of gazes containing the first group in xs as well as
    the children immediately following it."
-  [xs]
-  (reduce into
+  [gazes src-files sce]
+  (if
+   (string? (first sce))
+   (first gazes)
+   (reduce into
     (take-while
-      #(parent?
-         (.split (or ((get (ffirst xs) :attrs) :fullyQualifiedNames) "") ";")
-         (.split (or ((get (first %) :attrs) :fullyQualifiedNames) "") ";"))
-      xs)))
+     #(let
+       [clean (clean-source-code-entities src-files (first %))]
+       (or
+        (= "USE" (:how (first clean))))
+        (parent?
+         (map :fullyQualifiedName sce)
+         (map :fullyQualifiedName clean)))
+     gazes))))
+
+(defn clamp
+ [n lower upper]
+ "Ensure integer n is in [lower, upper)"
+ (min (max n lower) (max 0 (dec upper))))
+
+(defn distinct-depth
+ "Return the distance to a common parent element."
+ [sce other]
+ (if
+  (or (nil? (first sce)) (nil? (first other)))
+  (max 0 (dec (count sce)))
+  (clamp
+   ((fn [rev-sce rev-other]
+     (cond
+      (nil? (first rev-other)) (dec (count rev-sce));0
+      (nil? (first rev-sce)) (- (count sce) (count rev-sce))
+      (and (= 1 (count rev-sce)) (= 1 (count rev-other))) 0
+      (= (first rev-sce) (first rev-other))
+          (recur (rest rev-sce) (rest rev-other))
+      :else (count rev-sce)))
+     (reverse sce) (reverse other)) 0 (count sce))))
+;(defn distinct-depth
+; "Return the distance to a common parent element."
+; [sce other]
+; 0)
 
 (defn eventify
   "Convert a sequence of gazes to a sequence of events. Each event is a map
    with the keys :elementKind, :duration (measured in gazes),
    :identifier, :startTime, and :endTime."
-  [xml-root gazes]
-  (let [blocks (partition-by get-source-code-entities gazes)]
-    (map-indexed (fn [i block]
-      (let [family (copy-family (drop i blocks))
-            times (map
-                #(Long/parseLong (get (get % :attrs) :system-time) 10)
-                family)
-            sce (get-source-code-entities (first block))
-            local-name (short-name (first sce))
-            filename (:file (:attrs (first block)))
-            srcml-elem (srcml-find local-name
-                (get-srcml-file xml-root filename))
-            linecount (srcml-line-count srcml-elem)
-            element-kind (kind (first block))]
-        (hash-map
-          :duration (count family)
-          :elementKind element-kind
-          :identifier local-name
-          :startTime (reduce min times)
-          :endTime (reduce max times)
-          :numberOfLines (cond
-              (or (= element-kind "Method")
-                  (= element-kind "Class")) linecount
-              (or (= element-kind "Call")
-                  (= element-kind "Variable")) 1)
-          :numberOfNonEmptyLines (cond
-              (or (= element-kind "Method")
-                  (= element-kind "Class"))
-                (- linecount (srcml-blank-lines srcml-elem))
-              (or (= element-kind "Call")
-                  (= element-kind "Variable")) 1)
-          :leftPupilDilation (average (map
-              #(Float/parseFloat (:left-pupil-diameter (:attrs %)))
-              family))
-          :rightPupilDilation (average (map
-              #(Float/parseFloat (:right-pupil-diameter (:attrs %)))
-              family)))))
-      blocks)))
+  ([xml-root src-files gazes blocks i block]
+   (reverse
+    (map
+     (partial eventify xml-root src-files gazes blocks i block)
+     (range
+      (inc
+       (distinct-depth
+        (map
+         :fullyQualifiedName
+         (clean-source-code-entities src-files (first block)))
+        (map
+         :fullyQualifiedName
+         (clean-source-code-entities
+          src-files
+          (first (nth blocks (dec i) nil))))))))))
+  ([xml-root src-files gazes blocks i block undepth]
+   (let [sce (drop
+               undepth (clean-source-code-entities src-files (first block)))
+         family (copy-family (drop i blocks) src-files sce)
+         times (map
+             #(Long/parseLong (get (get % :attrs) :system-time) 10)
+             family)
+         local-name (short-name (first  sce))
+         filename (:file (:attrs (first block)))
+         srcml-elem (srcml-find local-name
+             (get-srcml-file xml-root filename))
+         linecount (srcml-line-count srcml-elem)
+         element-kind (kind (first block) sce)]
+     (hash-map
+       :duration (count family)
+       :elementKind element-kind
+       :identifier (if
+           (code? (first block))
+           (clean-name (first sce))
+           filename)
+       :startTime (reduce min times)
+       :endTime (reduce max times)
+       :numberOfLines (cond
+           (or (= element-kind "Method")
+               (= element-kind "Class")) linecount
+           (or (= element-kind "Call")
+               (= element-kind "Variable")) 1)
+       :numberOfNonEmptyLines (cond
+           (or (= element-kind "Method")
+               (= element-kind "Class"))
+             (- linecount (srcml-blank-lines srcml-elem))
+           (or (= element-kind "Call")
+               (= element-kind "Variable")) 1)
+       :leftPupilDilation (average (map
+           #(Float/parseFloat (:left-pupil-diameter (:attrs %)))
+           family))
+       :rightPupilDilation (average (map
+           #(Float/parseFloat (:right-pupil-diameter (:attrs %)))
+           family))))))
 
 (defn -main [& args]
   (case (first args)
@@ -369,20 +461,45 @@
                           (get cur-interval :average-left-validation)
                           ", Right validation average: "
                           (get cur-interval :average-right-validation)))))))
-    "events" (write-csv-file (nth args 3)
-               (eventify
-                 (read-xml-file (nth args 1))
-                 (filter
-                   #(or (ast? %) (noncode? %))
-                   (get-gazes-from-root
-                     (read-xml-file (nth args 2)))))
-               [:identifier :duration :elementKind :numberOfNonEmptyLines
-                :numberOfLines :startTime :endTime
+    "events" (write-csv-file (nth args 4)
+               (let
+                 [xml-root (read-xml-file (nth args 1))
+                  src-files (with-open
+                      [rdr (clojure.java.io/reader (nth args 2))]
+                      (doall (line-seq rdr)))
+                  gazes (filter
+                      valid?
+                      (get-gazes-from-root (read-xml-file (nth args 3))))
+                  blocks (partition-by
+                      (partial clean-source-code-entities src-files) gazes)]
+                 (reverse (reduce into (map-indexed
+                   (partial eventify xml-root src-files gazes blocks)
+                   blocks))))
+               [:identifier :duration :elementKind
+                :numberOfNonEmptyLines :numberOfLines :startTime :endTime
                 :leftPupilDilation :rightPupilDilation])
+    "duplicates" (write-csv-file (nth args 2)
+                  (map
+                   #(hash-map
+                     :tracker-time (:tracker-time (:attrs (first %)))
+                     :duplicates (dec (count %)))
+                   (partition-by
+                    #(:tracker-time (:attrs %))
+                    (get
+                     (first
+                      (filter
+                       #(= (get % :tag) :gazes)
+                       (get
+                        (first (read-xml-file (nth args 1)))
+                        :content)))
+                     :content)))
+                  [:tracker-time :duplicates])
     (println (str "How would you like to run this program? Specify as args.\n"
                   "  <prog.jar> ranked-method-decl <GAZE_FILE> <OUT_CSV>\n"
                   "  <prog.jar> ranked-lines <GAZE_FILE> <OUT_CSV>\n"
                   "  <prog.jar> ranked-lines-in-method <GAZE_FILE> <OUT_CSV> "
                   "<FULLY_QUALIFIED_METHOD_NAME>\n"
                   "  <prog.jar> validate <GAZE_FILE>\n"
-                  "  <proj.jar> events <SCRML_PATH> <GAZE_FILE> <OUT_CSV>"))))
+                  "  <proj.jar> events <SCRML_PATH> <SRC_FILE_LIST>"
+                  " <GAZE_FILE> <OUT_CSV>\n"
+                  "  <proj.jar> dulpicates <GAZE_FILE> <OUT_CSV>"))))
