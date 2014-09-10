@@ -33,6 +33,16 @@
   (get (first (filter #(= (get % :tag) :gazes)
       (get (first xml-root) :content))) :content))
 
+ (defn get-gazes-from-root-legacy
+   "When the return value of read-xml-file is provided, an array of the gaze
+    hashes are returned. This is an older version of the above function."
+   [xml-root]
+   (map first
+     (partition-by
+       #(:tracker-time (:attrs %))
+       (get (first (filter #(= (get % :tag) :gazes)
+           (get (first xml-root) :content))) :content))))
+
 (defn guess-class
  "Work out the parent's name if the filename refers to the enclosing class"
  [src-files filename]
@@ -527,7 +537,7 @@
                         [:line :file :fullyQualifiedNames :count])))
     "line-info-in-method" (dorun
       (let [res (to-sorted-csv-hash (line-durations-and-revisits
-                (only-method-named (get-gazes-from-root (read-xml-file
+                (only-method-named (get-gazes-from-root-legacy (read-xml-file
                 (nth args 1))) (nth args 3))))]
         (write-csv-file (nth args 2) res
           [:line :file :fullyQualifiedNames :left-pupil-diameter
