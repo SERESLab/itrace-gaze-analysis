@@ -246,14 +246,16 @@
   [gaze-list]
   (let [gaze-list-attrs (map #(get % :attrs) gaze-list)
         gaze-list-visits (gaze-attrs-tag-line-visits gaze-list-attrs)]
-    (map (fn [x]
+    (filter #(> (get % :visits) 0) (map (fn [x]
           (let [k (first x)
                 v (second x)
-                visits (count (filter #(true? (get % :visit)) v))
+                visit-partitions (filter #(> (count % ) 1)
+                  (break-before-each #(get % :visit) v))
+                visits (count visit-partitions)
                 duration (reduce + (map (fn [part]
                       (- (read-string (get (last part) :system-time))
                          (read-string (get (first part) :system-time))))
-                    (break-before-each #(get % :visit) v)))]
+                    visit-partitions))]
             (reduce (fn [prev cur]
                 (merge cur { :left-validation
                              (/ (+ (get prev :left-validation)
@@ -271,7 +273,7 @@
                              (get prev :fullyQualifiedNames) ";"
                              (get cur :fullyQualifiedNames)) }))
               (map #(merge % { :visits visits :duration duration }) v)))
-          ) (group-by #(get % :line) gaze-list-visits))))
+          ) (group-by #(get % :line) gaze-list-visits)))))
 
 (defn to-sorted-csv-hash
   "Given the output of line-durations-and-revisits, return hashes of each line,
