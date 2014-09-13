@@ -171,7 +171,7 @@
       (first (keep (partial srcml-find local-name) (:content xml-root))))))
 
 (defn file+sces+lines
-  "Transform a list of gaze hashes into a list of strings containing the file,
+  "Transform a list of gaze hashes into a list of hashes containing the file,
    source code entities, and line number."
   [gaze-list]
   (map #(let [attrs (get % :attrs)] {
@@ -184,6 +184,20 @@
   "Get source code entities for each gaze in an array."
   [gazes-list]
   (map #(get-source-code-entities %) gazes-list))
+
+(defn all-sces-names-and-files
+  "Get a flat list of hashes with all source code entities (:fullyQualifiedName)
+   and the file (:file) of all gazes. Entities will appear multiple times if
+   they appear in multiple gazes."
+  [gazes-list]
+  (flatten (map (fn [gaze]
+        (map (fn [sce]
+            {
+              :fullyQualifiedName (get sce :fullyQualifiedName)
+              :file (get (get gaze :attrs) :file)
+            })
+          (get-source-code-entities gaze)))
+      gazes-list)))
 
 (defn only-method-declarations
   "Filter out all source code entities from a list which do not contain method
@@ -548,6 +562,13 @@
                 (sources-each-gaze (get-gazes-from-root (read-xml-file
                 (nth args 1))))))))))]
         (write-csv-file (nth args 2) res [:fullyQualifiedName :count])))
+    "ranked-entities" (dorun
+        (let [sces-and-files (all-sces-names-and-files (get-gazes-from-root
+                             (read-xml-file (nth args 1))))
+              sces (map #(select-keys % [:fullyQualifiedName]) sces-and-files)
+              res (filter #(> (count (get % :fullyQualifiedName)) 0)
+                          (sort-distinct-by-count-desc (distinct-count sces)))]
+          (write-csv-file (nth args 2) res [:fullyQualifiedName :count])))
     "ranked-lines" (dorun
       (let [res (sort-distinct-by-count-desc (distinct-count (file+sces+lines
                 (get-gazes-from-root (read-xml-file (nth args 1))))))]
