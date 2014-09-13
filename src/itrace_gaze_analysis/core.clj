@@ -296,6 +296,29 @@
             :duration (get item :duration) }))
       sorted-list)))
 
+(defn csv-hash-fill-missing-lines
+  "Given the output of to-sorted-csv-hash, returns the same result, but with
+   missing lines filled in with expected values for a line with no gazes."
+  [csv-row-list start-line num-lines]
+  (let [line-num-to-row (zipmap (map #(Integer. (get % :line)) csv-row-list)
+                                csv-row-list)
+        all-line-nums (take num-lines (drop start-line (range)))
+        one-file (reduce #(if (nil? (get %2 :file)) %1 (get %2 :file))
+                         csv-row-list)]
+    (map (fn [line-num]
+        (if (nil? (get line-num-to-row line-num))
+          { :line line-num
+            :file one-file
+            :fullyQualifiedNames ""
+            :left-pupil-diameter 0.0
+            :right-pupil-diameter 0.0
+            :left-validation 1.0
+            :right-validation 1.0
+            :visits 0
+            :duration 0 }
+          (get line-num-to-row line-num)))
+      all-line-nums)))
+
 (defn get-fully-qualified-names
   "Gets the fully qualified name of a source code entity."
   [sce-list]
@@ -538,9 +561,11 @@
         (write-csv-file (nth args 2) res
                         [:line :file :fullyQualifiedNames :count])))
     "line-info-in-method" (dorun
-      (let [res (to-sorted-csv-hash (line-durations-and-revisits
-                (only-method-named (get-gazes-from-root-legacy (read-xml-file
-                (nth args 1))) (nth args 3))))]
+      (let [res (csv-hash-fill-missing-lines (to-sorted-csv-hash
+                (line-durations-and-revisits (only-method-named
+                (get-gazes-from-root-legacy (read-xml-file (nth args 1)))
+                (nth args 3))))
+                (Integer. (nth args 4)) (Integer. (nth args 5)))]
         (write-csv-file (nth args 2) res
           [:line :file :fullyQualifiedNames :left-pupil-diameter
            :right-pupil-diameter :left-validation :right-validation
@@ -610,6 +635,8 @@
                   "  <prog.jar> ranked-lines <GAZE_FILE> <OUT_CSV>\n"
                   "  <prog.jar> ranked-lines-in-method <GAZE_FILE> <OUT_CSV> "
                   "<FULLY_QUALIFIED_METHOD_NAME>\n"
+                  "  <prog.jar> line-info-in-method <GAZE_FILE> <OUT_CSV> "
+                  "<FULLY_QUALIFIED_METHOD_NAME> <START_LINE> <NUM_LINES>\n"
                   "  <prog.jar> validate <GAZE_FILE>\n"
                   "  <proj.jar> events <SCRML_PATH> <SRC_FILE_LIST>"
                   " <GAZE_FILE> <OUT_CSV>\n"
