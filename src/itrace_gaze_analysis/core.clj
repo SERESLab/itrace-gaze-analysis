@@ -192,10 +192,8 @@
   [gazes-list]
   (flatten (map (fn [gaze]
         (map (fn [sce]
-            {
-              :fullyQualifiedName (get sce :fullyQualifiedName)
-              :file (get (get gaze :attrs) :file)
-            })
+            (update-in gaze [:attrs :fullyQualifiedNames]
+                       (fn [x] (get sce :fullyQualifiedName))))
           (get-source-code-entities gaze)))
       gazes-list)))
 
@@ -257,7 +255,7 @@
    code entities are merged (often duplicated). The values :duration, length of
    time gazes occur on line overall, and :visits, amount of times the line is
    visited after another gaze event, are added to the hash."
-  [gaze-list]
+  [gaze-list group-by-fn]
   (let [gaze-list-attrs (map #(get % :attrs) gaze-list)
         gaze-list-visits (gaze-attrs-tag-line-visits gaze-list-attrs)]
     (filter #(> (get % :visits) 0) (map (fn [x]
@@ -287,7 +285,7 @@
                              (get prev :fullyQualifiedNames) ";"
                              (get cur :fullyQualifiedNames)) }))
               (map #(merge % { :visits visits :duration duration }) v)))
-          ) (group-by #(get % :line) gaze-list-visits)))))
+          ) (group-by group-by-fn gaze-list-visits)))))
 
 (defn to-sorted-csv-hash
   "Given the output of line-durations-and-revisits, return hashes of each line,
@@ -314,24 +312,25 @@
   "Given the output of to-sorted-csv-hash, returns the same result, but with
    missing lines filled in with expected values for a line with no gazes."
   [csv-row-list start-line num-lines]
-  (let [line-num-to-row (zipmap (map #(Integer. (get % :line)) csv-row-list)
-                                csv-row-list)
+  (let [line-num-to-row (group-by :line (map (fn [gaze]
+                              (update-in gaze [:line] #(Integer. %)))
+                            csv-row-list))
         all-line-nums (take num-lines (drop start-line (range)))
         one-file (reduce #(if (nil? (get %2 :file)) %1 (get %2 :file))
                          csv-row-list)]
-    (map (fn [line-num]
-        (if (nil? (get line-num-to-row line-num))
-          { :line line-num
-            :file one-file
-            :fullyQualifiedNames ""
-            :left-pupil-diameter 0.0
-            :right-pupil-diameter 0.0
-            :left-validation 1.0
-            :right-validation 1.0
-            :visits 0
-            :duration 0 }
-          (get line-num-to-row line-num)))
-      all-line-nums)))
+    (apply concat (map (fn [line-num]
+          (if (nil? (get line-num-to-row line-num))
+            [{ :line line-num
+               :file one-file
+               :fullyQualifiedNames ""
+               :left-pupil-diameter 0.0
+               :right-pupil-diameter 0.0
+               :left-validation 1.0
+               :right-validation 1.0
+               :visits 0
+               :duration 0 }]
+            (get line-num-to-row line-num)))
+        all-line-nums))))
 
 (defn get-fully-qualified-names
   "Gets the fully qualified name of a source code entity."
@@ -565,10 +564,11 @@
     "ranked-entities" (dorun
         (let [sces-and-files (all-sces-names-and-files (get-gazes-from-root
                              (read-xml-file (nth args 1))))
-              sces (map #(select-keys % [:fullyQualifiedName]) sces-and-files)
-              res (filter #(> (count (get % :fullyQualifiedName)) 0)
+              sces (map #(select-keys (get % :attrs) [:fullyQualifiedNames])
+                        sces-and-files)
+              res (filter #(> (count (get % :fullyQualifiedNames)) 0)
                           (sort-distinct-by-count-desc (distinct-count sces)))]
-          (write-csv-file (nth args 2) res [:fullyQualifiedName :count])))
+          (write-csv-file (nth args 2) res [:fullyQualifiedNames :count])))
     "ranked-lines" (dorun
       (let [res (sort-distinct-by-count-desc (distinct-count (file+sces+lines
                 (get-gazes-from-root (read-xml-file (nth args 1))))))]
@@ -585,7 +585,20 @@
       (let [res (csv-hash-fill-missing-lines (to-sorted-csv-hash
                 (line-durations-and-revisits (only-method-named
                 (get-gazes-from-root-legacy (read-xml-file (nth args 1)))
-                (nth args 3))))
+                (nth args 3)) #(get % :line)))
+                (Integer. (nth args 4)) (Integer. (nth args 5)))]
+        (write-csv-file (nth args 2) res
+          [:line :file :fullyQualifiedNames :left-pupil-diameter
+           :right-pupil-diameter :left-validation :right-validation
+           :duration :visits])))
+    "line-sce-info-in-method" (dorun
+      (let [namesfiles (all-sces-names-and-files
+                (only-method-named (get-gazes-from-root-legacy
+                (read-xml-file (nth args 1)))
+                (nth args 3)))
+            res (csv-hash-fill-missing-lines (to-sorted-csv-hash
+                (line-durations-and-revisits namesfiles
+                #(select-keys % [:line :fullyQualifiedNames])))
                 (Integer. (nth args 4)) (Integer. (nth args 5)))]
         (write-csv-file (nth args 2) res
           [:line :file :fullyQualifiedNames :left-pupil-diameter
@@ -653,6 +666,7 @@
                   [:tracker-time :duplicates])
     (println (str "How would you like to run this program? Specify as args.\n"
                   "  <prog.jar> ranked-method-decl <GAZE_FILE> <OUT_CSV>\n"
+                  "  <prog.jar> ranked-entities <GAZE_FILE> <OUT_CSV>\n"
                   "  <prog.jar> ranked-lines <GAZE_FILE> <OUT_CSV>\n"
                   "  <prog.jar> ranked-lines-in-method <GAZE_FILE> <OUT_CSV> "
                   "<FULLY_QUALIFIED_METHOD_NAME>\n"
