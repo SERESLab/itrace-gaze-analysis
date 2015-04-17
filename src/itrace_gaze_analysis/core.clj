@@ -7,6 +7,8 @@
          '[clojure.data.csv :as csv]
          'clojure.set)
 
+(defmacro dbg[x] `(let [x# ~x] (println "dbg:" '~x "=" x#) x#))
+
 (defn read-xml-file
   "Reads an XML document specified by the first parameter and represents it as
    arrays and hashes."
@@ -67,6 +69,7 @@
         (.split (get (get gaze-xml :attrs) :types) ";")
         (.split (get (get gaze-xml :attrs) :hows) ";"))
       [])))
+
 
 (defn ast?
   "Checks if the gaze has AST information."
@@ -289,6 +292,91 @@
               (map #(merge % { :visits visits :duration duration }) v)))
           ) (group-by #(get % :line) gaze-list-visits)))))
 
+          (defn line-durations-and-revisits-clean
+            [gaze-list]
+            (let [gaze-list-attrs (map #(get % :attrs) gaze-list)
+                  gaze-list-visits (gaze-attrs-tag-line-visits gaze-list-attrs)]
+              (filter #(> (get % :visits) 0) (map (fn [x]
+                    (let [k (first x)
+                          v (second x)
+                          visit-partitions (filter #(> (count % ) 1)
+                            (break-before-each #(get % :visit) v))
+                          visits (count visit-partitions)
+                          duration (reduce + (map (fn [part]
+                                (- (read-string (get (last part) :system-time))
+                                   (read-string (get (first part) :system-time))))
+                              visit-partitions))]
+                      (reduce (fn [prev cur]
+                          (let [sces (map (fn [a b c] { :fullyQualifiedName a :type b :how c })
+                              (.split (or (get cur :fullyQualifiedNames) "") ";")
+                              (.split (or (get cur :types) "") ";")
+                              (.split (or (get cur :hows) "") ";"))]
+                          (merge cur { :left-validation
+                                       (/ (+ (get prev :left-validation)
+                                             (get cur :left-validation)) 2)
+                                       :right-validation
+                                       (/ (+ (get prev :right-validation)
+                                             (get cur :right-validation)) 2)
+                                       :left-pupil-diameter
+                                       (/ (+ (get prev :left-pupil-diameter)
+                                             (get cur :left-pupil-diameter)) 2)
+                                       :right-pupil-diameter
+                                       (/ (+ (get prev :right-pupil-diameter)
+                                             (get cur :right-pupil-diameter)) 2)
+                                       :fullyQualifiedNames (or
+                                           (get (first (concat
+                                               (filter #(and (= (get % :type) "METHOD") (= (get % :how) "DECLARE")) sces)
+                                               (filter #(and (= (get % :type) "TYPE") (= (get % :how) "DECLARE")) sces)))
+                                            :fullyQualifiedName)
+                                           (get prev :fullyQualifiedNames)
+                                           "")})))
+                        (map #(merge % { :visits visits :duration duration }) v)))
+                    ) (group-by #(get % :line) gaze-list-visits)))))
+
+                    (defn line-durations-and-revisits-times
+                      [gaze-list]
+                      (let [gaze-list-attrs (map #(get % :attrs) gaze-list)
+                            gaze-list-visits (gaze-attrs-tag-line-visits gaze-list-attrs)]
+                        (filter #(> (get % :visits) 0) (flatten (map (fn [x]
+                              (let [k (first x)
+                                    v (second x)
+                                    visit-partitions (filter #(> (count % ) 1)
+                                      (break-before-each #(get % :visit) v))
+                                    visits (count visit-partitions)
+                                    visit-times (map #(get % :system-time) (filter #(= (get % :visit) true) (map first visit-partitions)))
+                                    duration (reduce + (map (fn [part]
+                                          (- (read-string (get (last part) :system-time))
+                                             (read-string (get (first part) :system-time))))
+                                        visit-partitions))
+                                line-hash (reduce (fn [prev cur]
+                                    (let [sces (map (fn [a b c] { :fullyQualifiedName a :type b :how c })
+                                        (.split (or (get cur :fullyQualifiedNames) "") ";")
+                                        (.split (or (get cur :types) "") ";")
+                                        (.split (or (get cur :hows) "") ";"))]
+                                    (merge cur { :left-validation
+                                                 (/ (+ (get prev :left-validation)
+                                                       (get cur :left-validation)) 2)
+                                                 :right-validation
+                                                 (/ (+ (get prev :right-validation)
+                                                       (get cur :right-validation)) 2)
+                                                 :left-pupil-diameter
+                                                 (/ (+ (get prev :left-pupil-diameter)
+                                                       (get cur :left-pupil-diameter)) 2)
+                                                 :right-pupil-diameter
+                                                 (/ (+ (get prev :right-pupil-diameter)
+                                                       (get cur :right-pupil-diameter)) 2)
+                                                 :fullyQualifiedNames (or
+                                                     (get (first (concat
+                                                         (filter #(and (= (get % :type) "METHOD") (= (get % :how) "DECLARE")) sces)
+                                                         (filter #(and (= (get % :type) "TYPE") (= (get % :how) "DECLARE")) sces)))
+                                                      :fullyQualifiedName)
+                                                     (get prev :fullyQualifiedNames)
+                                                     "")})))
+                                  (map #(merge % { :visits visits :duration duration }) v))]
+                                  (map #(assoc line-hash :system-time %) visit-times))
+                              ) (group-by #(get % :line) gaze-list-visits))))))
+
+
 (defn to-sorted-csv-hash
   "Given the output of line-durations-and-revisits, return hashes of each line,
    sorted by line number, containing only fields necessary for the output CSV.
@@ -301,6 +389,7 @@
             (filter not-empty (.split (get item :fullyQualifiedNames) ";"))))]
           { :line (get item :line)
             :file (get item :file)
+            :system-time (get item :system-time)
             :fullyQualifiedNames fully-qualified-names
             :left-pupil-diameter (get item :left-pupil-diameter)
             :right-pupil-diameter (get item :right-pupil-diameter)
@@ -591,6 +680,24 @@
           [:line :file :fullyQualifiedNames :left-pupil-diameter
            :right-pupil-diameter :left-validation :right-validation
            :duration :visits])))
+    "line-info" (dorun
+        (let [res (to-sorted-csv-hash
+                (line-durations-and-revisits-clean
+                    (get-gazes-from-root-legacy
+                        (read-xml-file (nth args 1)))))]
+        (write-csv-file (nth args 2) res
+             [:line :file :fullyQualifiedNames :left-pupil-diameter
+                :right-pupil-diameter :left-validation :right-validation
+                :duration :visits])))
+    "line-info-times" (dorun
+                    (let [res (to-sorted-csv-hash
+                            (line-durations-and-revisits-times
+                                (get-gazes-from-root-legacy
+                                    (read-xml-file (nth args 1)))))]
+                    (write-csv-file (nth args 2) res
+                         [:line :file :fullyQualifiedNames :left-pupil-diameter
+                            :right-pupil-diameter :left-validation :right-validation
+                            :duration :visits :system-time])))
     "validate" (dorun
       (let [gaze-list (get-gazes-from-root (read-xml-file (nth args 1)))]
         (println "Difference between times of two adjacent gazes which are "
